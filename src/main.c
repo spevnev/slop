@@ -173,12 +173,15 @@ static int init_tty(tty_info *tty) {
         return -1;
     }
 
-    // Close TTY fds before `vhangup` so that it succeeds and doesn't SIGHUP us.
+    // Close TTY fds before `vhangup`.
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
 
+    // Ignore SIGHUP so that the program does not get killed in case it is already controlling the TTY.
+    signal(SIGHUP, SIG_IGN);
     vhangup();
+    signal(SIGHUP, SIG_DFL);
 
     // Start a new session and open the TTY which will make it controlling.
     setsid();
