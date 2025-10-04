@@ -180,13 +180,19 @@ static int init_tty(tty_info *tty) {
 
     vhangup();
 
-    // Now that its clear, reopen TTY.
+    // Start a new session and open the TTY which will make it controlling.
+    setsid();
     if (open_tty(tty->path) != 0) return -1;
-
-    // Reset TTY owner to root.
     if (chown_tty(0) != 0) return -1;
+    if (set_tty_attributes() != 0) return -1;
 
-    return set_tty_attributes();
+    // Only foreground job can read from the controlling TTY, set it to the current PGID.
+    if (tcsetpgrp(STDIN_FILENO, getpgrp()) != 0) {
+        syslog(LOG_ERR, "Failed to set foreground job PGID: %s", strerror(errno));
+        return -1;
+    }
+
+    return 0;
 }
 
 static struct utmpx new_utmpx_entry(const char *username, const tty_info *tty) {
