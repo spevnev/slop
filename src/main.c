@@ -33,8 +33,6 @@
 #define ROOT_PATH_ENV "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 #define USER_PATH_ENV "/usr/local/bin:/usr/bin:/bin"
 
-#define RETRY_DELAY 2
-
 typedef struct {
     const char *path;
     const char *name;
@@ -265,7 +263,7 @@ static pam_handle_t *pamx_init(const tty_info *tty, const char *username) {
     return pamh;
 }
 
-static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, const char *title) {
+static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, const char *title, int retry_delay) {
     ASSERT(pamh != NULL && tty != NULL);
 
     while (true) {
@@ -294,7 +292,7 @@ static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, const char *title)
         }
 
         // Screen is cleared on retry, give user some time to read errors.
-        sleep(RETRY_DELAY);
+        sleep(retry_delay);
     }
 
     int result = pam_acct_mgmt(pamh, 0);
@@ -397,6 +395,7 @@ static char *get_shell_name(const char *shell_path) {
 int main(int argc, char **argv) {
     args a = {0};
     bool *help = option_flag(&a, 'h', "help", "Show help");
+    long *retry_delay = option_long(&a, 'd', "delay", "Number of seconds to wait after failed login attempt", true, 2);
     const char **title = option_str(&a, 't', "title", "Title to print above the prompt", true, NULL);
     const char **provided_username = option_str(&a, 'u', "username", "Use the provided username", true, NULL);
     const char **command = option_str(&a, 'c', "command", "Command to run on successful login", true, NULL);
@@ -419,6 +418,11 @@ int main(int argc, char **argv) {
         goto exit1;
     }
 
+    if (*retry_delay <= 0) {
+        fprintf(stderr, "Retry delay must be a positive integer.\n");
+        goto exit1;
+    }
+
     // Prevent user from killing the program using 'Ctrl+C' and 'Ctrl+\'.
     signal(SIGQUIT, SIG_IGN);
     signal(SIGINT, SIG_IGN);
@@ -438,7 +442,7 @@ int main(int argc, char **argv) {
 
     pam_handle_t *pamh = pamx_init(&tty, *provided_username);
     if (pamh == NULL) goto exit1;
-    if (pamx_auth(pamh, &tty, *title) != 0) goto exit2;
+    if (pamx_auth(pamh, &tty, *title, *retry_delay) != 0) goto exit2;
 
     const char *username = pamx_get_username(pamh);
     if (username == NULL) {
