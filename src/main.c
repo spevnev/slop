@@ -85,6 +85,64 @@ static int chown_tty(uid_t uid) {
     return 0;
 }
 
+// Reset TTY attributes to reasonable settings, equivalent to `stty sane pass8` (see `man stty`).
+// Set canonical mode, clear character delays, set 8-bit characters, reset control characters.
+// See `man termios` to read about each option.
+static int set_tty_attributes(void) {
+    struct termios tp;
+    if (tcgetattr(STDIN_FILENO, &tp) < 0) {
+        syslog(LOG_ERR, "Failed to get terminal attributes: %s", strerror(errno));
+        return -1;
+    }
+
+    // Reset flags.
+    tp.c_iflag |= TTYDEF_IFLAG | BRKINT | ICRNL | IMAXBEL;
+    tp.c_iflag &= ~(IGNBRK | INLCR | IGNCR | IXOFF | IUCLC | IXANY | ISTRIP | IUTF8);
+
+    tp.c_oflag |= TTYDEF_OFLAG | OPOST | ONLCR | NL0 | CR0 | TAB0 | BS0 | VT0 | FF0;
+    tp.c_oflag &= ~(OLCUC | OCRNL | ONOCR | ONLRET | OFILL | OFDEL | NLDLY | CRDLY | TABDLY | BSDLY | VTDLY | FFDLY);
+
+    tp.c_cflag |= TTYDEF_CFLAG | CREAD | CS8;
+    tp.c_cflag &= ~PARENB;
+
+    tp.c_lflag |= TTYDEF_LFLAG | ISIG | ICANON | IEXTEN | ECHO | ECHOE | ECHOK | ECHOKE | ECHOCTL;
+    tp.c_lflag &= ~(ECHONL | ECHOPRT | NOFLSH | TOSTOP | XCASE);
+
+    // Set UTF8 mode if supported.
+    int kbmode;
+    if (ioctl(STDIN_FILENO, KDGKBMODE, &kbmode) == 0 && kbmode == K_UNICODE) tp.c_iflag |= IUTF8;
+
+    // Reset special characters.
+    // From `man termios`, VTIME and VMIN may overlap with VEOL and VEOF.
+    // The former are ignored in canonical mode (ICANON), so set them first so
+    // that they get overwritten in case of the overlap.
+    tp.c_cc[VTIME] = 0;
+    tp.c_cc[VMIN] = 1;
+
+    tp.c_cc[VINTR] = CINTR;
+    tp.c_cc[VQUIT] = CQUIT;
+    tp.c_cc[VERASE] = CERASE;
+    tp.c_cc[VKILL] = CKILL;
+    tp.c_cc[VEOF] = CEOF;
+    tp.c_cc[VSTART] = CSTART;
+    tp.c_cc[VSTOP] = CSTOP;
+    tp.c_cc[VSUSP] = CSUSP;
+    tp.c_cc[VREPRINT] = CREPRINT;
+    tp.c_cc[VDISCARD] = CDISCARD;
+    tp.c_cc[VWERASE] = CWERASE;
+    tp.c_cc[VLNEXT] = CLNEXT;
+
+    // Disable alternative new line characters.
+    tp.c_cc[VEOL] = _POSIX_VDISABLE;
+    tp.c_cc[VEOL2] = _POSIX_VDISABLE;
+
+    if (tcsetattr(STDIN_FILENO, TCSADRAIN, &tp)) {
+        syslog(LOG_ERR, "Failed to set terminal attributes: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 static int init_tty(tty_info *tty) {
     ASSERT(tty != NULL);
 
@@ -130,7 +188,7 @@ static int init_tty(tty_info *tty) {
     // Reset TTY owner to root.
     if (chown_tty(0) != 0) return -1;
 
-    return 0;
+    return set_tty_attributes();
 }
 
 static struct utmpx new_utmpx_entry(const char *username, const tty_info *tty) {
