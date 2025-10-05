@@ -47,6 +47,16 @@ typedef struct {
         }                                                                                     \
     } while (0)
 
+static pid_t child_pid = -1;
+static void parent_sig_handler(__attribute__((unused)) int signal) {
+    ASSERT(child_pid != -1);
+    // Shells ignore SIGTERM, so always send SIGHUP.
+    kill(child_pid, SIGHUP);
+}
+
+static volatile sig_atomic_t child_should_exit = false;
+static void child_sig_handler(__attribute__((unused)) int signal) { child_should_exit = true; }
+
 static void clear_tty(void) { printf("\033[H\033[J"); }
 
 static int open_tty(const char *path) {
@@ -402,6 +412,8 @@ static char *get_shell_name(const char *shell_path) {
 }
 
 int main(int argc, char **argv) {
+    bool success = false;
+
     args a = {0};
     bool *help = option_flag(&a, 'h', "help", "Show help");
     long *retry_delay = option_long(&a, 'd', "delay", "Number of seconds to wait after failed login attempt", true, 2);
@@ -433,8 +445,8 @@ int main(int argc, char **argv) {
     }
 
     // Prevent user from killing the program using 'Ctrl+C' and 'Ctrl+\'.
-    signal(SIGQUIT, SIG_IGN);
     signal(SIGINT, SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
 
     // If locale is "", it is set according to the environment variables.
     setlocale(LC_ALL, "");
@@ -477,6 +489,59 @@ int main(int argc, char **argv) {
     if (chown_tty(pwd->pw_uid) != 0) goto exit3;
     log_utmp(username, &tty);
 
+    // Detach the controlling TTY to reacquire in the child session.
+    // It sends SIGHUP to the foreground job (current process), ignore it.
+    signal(SIGHUP, SIG_IGN);
+    if (ioctl(STDIN_FILENO, TIOCNOTTY) != 0) {
+        syslog(LOG_ERR, "Failed to detach the controlling TTY: %s", strerror(errno));
+        goto exit4;
+    }
+    signal(SIGHUP, SIG_DFL);
+
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+
+    sigset_t signals = {0};
+    sigaddset(&signals, SIGHUP);
+    sigaddset(&signals, SIGTERM);
+    sigprocmask(SIG_BLOCK, &signals, NULL);
+
+    // Create child process that will exec, and parent who will cleanup when it exits.
+    pid_t pid = fork();
+    if (pid < 0) {
+        syslog(LOG_ERR, "Failed to fork");
+        goto exit4;
+    }
+
+    if (pid != 0) {
+        // Setup handlers that will forward signals to the child process.
+        child_pid = pid;
+        signal(SIGHUP, parent_sig_handler);
+        signal(SIGTERM, parent_sig_handler);
+        sigprocmask(SIG_UNBLOCK, &signals, NULL);
+
+        while (wait(NULL) == -1 && errno == EINTR);
+
+        success = true;
+        goto exit4;
+    }
+
+    // Use `PAM_DATA_SILENT` to indicate that we just want to release the resources,
+    // and the other process (parent) will properly end it.
+    pam_end(pamh, PAM_SUCCESS | PAM_DATA_SILENT);
+    // Unset pam handler to skip PAM cleanup.
+    pamh = NULL;
+
+    // Setup handlers that will set a flag to be checked later.
+    signal(SIGHUP, child_sig_handler);
+    signal(SIGTERM, child_sig_handler);
+    sigprocmask(SIG_UNBLOCK, &signals, NULL);
+
+    // Start a new session (and process group) so that signals sent to child don't kill parent.
+    setsid();
+    if (open_tty(tty.path) != 0) goto exit4;
+
     // Change user, drop root privileges.
     int result = setgid(pwd->pw_gid);
     ASSERT(result == 0);
@@ -490,10 +555,14 @@ int main(int argc, char **argv) {
         goto exit4;
     }
 
-    // Run shell or user-specified command.
+    // Ignored signals may remain ignored after exec, reset their handlers.
+    signal(SIGINT, SIG_DFL);
+    signal(SIGQUIT, SIG_DFL);
+
+    if (child_should_exit) goto exit4;
+
     char *shell_name = get_shell_name(pwd->pw_shell);
     if (shell_name == NULL) goto exit4;
-
     if (*command == NULL) {
         execlp(pwd->pw_shell, shell_name, NULL);
         syslog(LOG_ERR, "Failed to exec shell \"%s\": %s", pwd->pw_shell, strerror(errno));
@@ -505,17 +574,19 @@ int main(int argc, char **argv) {
     free(shell_name);
 
 exit4:
-    // NULL username indicates logout.
-    log_utmp(NULL, &tty);
-    pam_close_session(pamh, 0);
-    pam_setcred(pamh, PAM_DELETE_CRED);
+    if (pamh != NULL) {
+        // NULL username indicates logout.
+        log_utmp(NULL, &tty);
+        pam_close_session(pamh, 0);
+        pam_setcred(pamh, PAM_DELETE_CRED);
+    }
 exit3:
     free(pwdbuf);
     free(pwd);
 exit2:
-    pam_end(pamh, PAM_SYSTEM_ERR);
+    if (pamh != NULL) pam_end(pamh, success ? PAM_SUCCESS : PAM_SYSTEM_ERR);
 exit1:
     free_args(&a);
     closelog();
-    return EXIT_FAILURE;
+    return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }
