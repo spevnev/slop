@@ -352,7 +352,7 @@ static int init_environ(pam_handle_t *pamh, const struct passwd *pwd) {
         setenv("LOGNAME", pwd->pw_name, 1) != 0 ||  //
         setenv("SHELL", pwd->pw_shell, 1) != 0 ||   //
         setenv("PATH", pwd->pw_uid == 0 ? ROOT_PATH_ENV : USER_PATH_ENV, 1) != 0) {
-        syslog(LOG_ERR, "Failed to set environment variables");
+        syslog(LOG_ERR, "Failed to set environment variable: %s", strerror(errno));
         return -1;
     }
 
@@ -373,29 +373,34 @@ static int init_environ(pam_handle_t *pamh, const struct passwd *pwd) {
 static struct passwd *get_passwd(const char *username, char **buffer) {
     ASSERT(username != NULL && buffer != NULL);
 
-    struct passwd *result_buffer = malloc(sizeof(*result_buffer));
-    if (result_buffer == NULL) {
+    struct passwd *passwd_buffer = malloc(sizeof(*passwd_buffer));
+    if (passwd_buffer == NULL) {
         syslog(LOG_ERR, "Process ran out of memory");
         return NULL;
     }
 
     *buffer = malloc(GETPWNAM_BUFFER_SIZE);
     if (*buffer == NULL) {
-        free(result_buffer);
+        free(passwd_buffer);
         syslog(LOG_ERR, "Process ran out of memory");
         return NULL;
     }
 
-    struct passwd *result = NULL;
-    if (getpwnam_r(username, result_buffer, *buffer, GETPWNAM_BUFFER_SIZE, &result) != 0 || result == NULL) {
-        free(result_buffer);
+    struct passwd *passwd = NULL;
+    int result = getpwnam_r(username, passwd_buffer, *buffer, GETPWNAM_BUFFER_SIZE, &passwd);
+    if (result != 0 || passwd == NULL) {
+        if (result != 0) {
+            syslog(LOG_ERR, "Failed to get password record: %s", strerror(result));
+        } else {
+            syslog(LOG_ERR, "Unknown username \"%s\"", username);
+        }
+        free(passwd_buffer);
         free(*buffer);
-        syslog(LOG_ERR, "Invalid username \"%s\"", username);
         return NULL;
     }
 
-    if (result->pw_shell == NULL) result->pw_shell = _PATH_BSHELL;
-    return result;
+    if (passwd->pw_shell == NULL) passwd->pw_shell = _PATH_BSHELL;
+    return passwd;
 }
 
 static char *get_shell_name(const char *shell_path) {
@@ -404,14 +409,16 @@ static char *get_shell_name(const char *shell_path) {
     const char *last_slash = strrchr(shell_path, '/');
     const char *name = last_slash == NULL ? shell_path : last_slash + 1;
 
-    char *buffer = malloc(1 + strlen(name) + 1);
+    size_t buffer_size = strlen(name) + 2;
+    char *buffer = malloc(buffer_size);
     if (buffer == NULL) {
         syslog(LOG_ERR, "Process ran out of memory");
         return NULL;
     }
     // Prepend '-' to the shell name (0th arg) to indicate that this is a login shell,
     // so that it runs `/etc/profile` and other initial configuration files.
-    sprintf(buffer, "-%s", name);
+    int written = snprintf(buffer, buffer_size, "-%s", name);
+    ASSERT(written == buffer_size - 1);
     return buffer;
 }
 
@@ -434,17 +441,19 @@ int main(int argc, char **argv) {
         printf("Usage: %s [options]\n", argv[0]);
         printf("\n");
         print_options(&a, stdout);
-        free_args(&a);
-        return EXIT_SUCCESS;
+        success = true;
+        goto exit1;
     }
 
     if (pos_args_len > 0) {
         fprintf(stderr, "Positional arguments are not allowed. See \"--help\".\n");
+        syslog(LOG_CRIT, "Invalid argument: positional arguments are not allowed");
         goto exit1;
     }
 
     if (*retry_delay <= 0) {
         fprintf(stderr, "Retry delay must be a positive integer.\n");
+        syslog(LOG_CRIT, "Invalid argument: retry delay must be a positive integer");
         goto exit1;
     }
 
