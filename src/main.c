@@ -221,7 +221,7 @@ static struct utmpx new_utmpx_entry(const char *username, const tty_info *tty) {
     gettimeofday(&tv, NULL);
 
     struct utmpx ut = {0};
-    ut.ut_type = LOGIN_PROCESS;
+    ut.ut_type = USER_PROCESS;
     ut.ut_pid = getpid();
     strncpy(ut.ut_line, tty->name, sizeof(ut.ut_line));
     strncpy(ut.ut_id, tty->number, sizeof(ut.ut_id));
@@ -231,13 +231,15 @@ static struct utmpx new_utmpx_entry(const char *username, const tty_info *tty) {
     return ut;
 }
 
+// Log a failed login attempt to btmp.
 static void log_btmp(const char *username, const tty_info *tty) {
     // NULL username indicates logout, use "(unknown)" instead.
     struct utmpx ut = new_utmpx_entry(username == NULL ? "(unknown)" : username, tty);
     updwtmpx(_PATH_BTMP, &ut);
 }
 
-static void log_utmp(const char *username, const tty_info *tty) {
+// Log login to utmp and wtmp.
+static void log_utmp_login(const char *username, const tty_info *tty) {
     struct utmpx ut = new_utmpx_entry(username, tty);
 
     utmpxname(_PATH_UTMP);
@@ -245,6 +247,21 @@ static void log_utmp(const char *username, const tty_info *tty) {
     pututxline(&ut);
     endutxent();
 
+    updwtmpx(_PATH_WTMP, &ut);
+}
+
+// Log logout to utmp and wtmp.
+static void log_utmp_logout(const char *username, const tty_info *tty) {
+    struct utmpx ut = new_utmpx_entry(username, tty);
+    ut.ut_type = DEAD_PROCESS;
+
+    utmpxname(_PATH_UTMP);
+    setutxent();
+    pututxline(&ut);
+    endutxent();
+
+    // wtmp uses NULL username to indicate logout.
+    memset(ut.ut_user, 0, sizeof(ut.ut_user));
     updwtmpx(_PATH_WTMP, &ut);
 }
 
@@ -424,7 +441,7 @@ static char *get_shell_name(const char *shell_path) {
     // Prepend '-' to the shell name (0th arg) to indicate that this is a login shell,
     // so that it runs `/etc/profile` and other initial configuration files.
     int written = snprintf(buffer, buffer_size, "-%s", name);
-    ASSERT(written == buffer_size - 1);
+    ASSERT(written == (int) (buffer_size - 1));
     return buffer;
 }
 
@@ -511,7 +528,7 @@ int main(int argc, char **argv) {
     if (pamx_open_session(pamh) != 0) goto exit3;
     if (init_environ(pamh, pwd) != 0) goto exit3;
     if (chown_tty(pwd->pw_uid) != 0) goto exit3;
-    log_utmp(username, &tty);
+    log_utmp_login(username, &tty);
 
     // Detach the controlling TTY to reacquire in the child session.
     // It sends SIGHUP to the foreground job (current process), ignore it.
@@ -596,8 +613,7 @@ int main(int argc, char **argv) {
 
 exit4:
     if (pamh != NULL) {
-        // NULL username indicates logout.
-        log_utmp(NULL, &tty);
+        log_utmp_logout(username, &tty);
         pam_close_session(pamh, 0);
         pam_setcred(pamh, PAM_DELETE_CRED);
     }
