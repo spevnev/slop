@@ -24,6 +24,12 @@
 #include <utmpx.h>
 #include "args.h"
 
+#if defined(__has_attribute) && __has_attribute(unused)
+#define UNUSED __attribute__((unused))
+#else
+#define UNUSED
+#endif
+
 #ifndef _PATH_BTMP
 #define _PATH_BTMP "/var/log/btmp"
 #endif
@@ -48,14 +54,14 @@ typedef struct {
     } while (0)
 
 static pid_t child_pid = -1;
-static void parent_sig_handler(__attribute__((unused)) int signal) {
+static void parent_sig_handler(UNUSED int signal) {
     ASSERT(child_pid != -1);
     // Shells ignore SIGTERM, so always send SIGHUP.
     kill(child_pid, SIGHUP);
 }
 
-static volatile sig_atomic_t child_should_exit = false;
-static void child_sig_handler(__attribute__((unused)) int signal) { child_should_exit = true; }
+static volatile sig_atomic_t should_exit = false;
+static void sig_handler(UNUSED int signal) { should_exit = true; }
 
 static void clear_tty(void) { printf("\033[H\033[J"); }
 
@@ -425,6 +431,15 @@ static char *get_shell_name(const char *shell_path) {
 int main(int argc, char **argv) {
     bool success = false;
 
+    // Prevent user from killing the program using 'Ctrl+C' and 'Ctrl+\'.
+    signal(SIGINT, SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
+
+    // If locale is "", it is set according to the environment variables.
+    setlocale(LC_ALL, "");
+
+    openlog("slop", 0, LOG_AUTHPRIV);
+
     args a = {0};
     bool *help = option_flag(&a, 'h', "help", "Show help");
     long *retry_delay = option_long(&a, 'd', "delay", "Number of seconds to wait after failed login attempt", true, 2);
@@ -457,15 +472,6 @@ int main(int argc, char **argv) {
         goto exit1;
     }
 
-    // Prevent user from killing the program using 'Ctrl+C' and 'Ctrl+\'.
-    signal(SIGINT, SIG_IGN);
-    signal(SIGQUIT, SIG_IGN);
-
-    // If locale is "", it is set according to the environment variables.
-    setlocale(LC_ALL, "");
-
-    openlog("slop", 0, LOG_AUTHPRIV);
-
     tty_info tty = {0};
     if (init_tty(&tty) != 0) goto exit1;
 
@@ -477,6 +483,11 @@ int main(int argc, char **argv) {
     pam_handle_t *pamh = pamx_init(&tty, *provided_username);
     if (pamh == NULL) goto exit1;
     if (pamx_auth(pamh, &tty, *title, *retry_delay) != 0) goto exit2;
+
+    // Set handlers after `pam_authenticate` because it blocks and is not interrupted by signals.
+    // Also, there are no resources that need to be cleaned up at this point.
+    signal(SIGTERM, sig_handler);
+    signal(SIGHUP, sig_handler);
 
     const char *username = pamx_get_username(pamh);
     if (username == NULL) {
@@ -509,7 +520,7 @@ int main(int argc, char **argv) {
         syslog(LOG_ERR, "Failed to detach the controlling TTY: %s", strerror(errno));
         goto exit4;
     }
-    signal(SIGHUP, SIG_DFL);
+    signal(SIGHUP, sig_handler);
 
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
@@ -540,16 +551,13 @@ int main(int argc, char **argv) {
         goto exit4;
     }
 
+    sigprocmask(SIG_UNBLOCK, &signals, NULL);
+
     // Use `PAM_DATA_SILENT` to indicate that we just want to release the resources,
     // and the other process (parent) will properly end it.
     pam_end(pamh, PAM_SUCCESS | PAM_DATA_SILENT);
     // Unset pam handler to skip PAM cleanup.
     pamh = NULL;
-
-    // Setup handlers that will set a flag to be checked later.
-    signal(SIGHUP, child_sig_handler);
-    signal(SIGTERM, child_sig_handler);
-    sigprocmask(SIG_UNBLOCK, &signals, NULL);
 
     // Start a new session (and process group) so that signals sent to child don't kill parent.
     setsid();
@@ -572,7 +580,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, SIG_DFL);
     signal(SIGQUIT, SIG_DFL);
 
-    if (child_should_exit) goto exit4;
+    if (should_exit) goto exit4;
 
     char *shell_name = get_shell_name(pwd->pw_shell);
     if (shell_name == NULL) goto exit4;
