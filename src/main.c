@@ -104,7 +104,7 @@ static int chown_tty(uid_t uid) {
 // See `man termios` to read about each option.
 static int set_tty_attributes(void) {
     struct termios tp;
-    if (tcgetattr(STDIN_FILENO, &tp) < 0) {
+    if (tcgetattr(STDIN_FILENO, &tp) != 0) {
         syslog(LOG_ERR, "Failed to get terminal attributes: %s", strerror(errno));
         return -1;
     }
@@ -189,23 +189,23 @@ static int init_tty(tty_info *tty) {
         return -1;
     }
 
-    // Close TTY fds before `vhangup`.
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
 
-    // Ignore SIGHUP so that the program does not get killed in case it is already controlling the TTY.
+    // Ignore SIGHUP to avoid getting killed if TTY is already the controlling terminal.
     signal(SIGHUP, SIG_IGN);
     vhangup();
     signal(SIGHUP, SIG_DFL);
 
-    // Start a new session and open the TTY which will make it controlling.
+    // Start a new session and reopen the TTY to make it the controlling terminal.
     setsid();
     if (open_tty(tty->path) != 0) return -1;
     if (chown_tty(0) != 0) return -1;
     if (set_tty_attributes() != 0) return -1;
 
-    // Only foreground job can read from the controlling TTY, set it to the current PGID.
+    // Make the current process the foreground job of the session.
+    // Only foreground can read from the terminal, and it receives all signals.
     if (tcsetpgrp(STDIN_FILENO, getpgrp()) != 0) {
         syslog(LOG_ERR, "Failed to set foreground job PGID: %s", strerror(errno));
         return -1;
@@ -294,8 +294,7 @@ static pam_handle_t *pamx_init(const tty_info *tty, const char *username) {
         return NULL;
     }
 
-    if ((result = pam_set_item(pamh, PAM_TTY, tty->path)) != PAM_SUCCESS ||
-        // Password prompt is hardcoded within PAM module, so set login prompt to match the style.
+    if ((result = pam_set_item(pamh, PAM_TTY, tty->path)) != PAM_SUCCESS ||  //
         (result = pam_set_item(pamh, PAM_USER_PROMPT, "Login: ")) != PAM_SUCCESS) {
         log_pam_error("set_item", pamh, result);
         pam_end(pamh, result);
@@ -309,14 +308,12 @@ static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, const char *title,
     ASSERT(pamh != NULL && tty != NULL);
 
     while (true) {
-        // Clear terminal and print the title before prompts from the PAM modules.
         clear_tty();
         if (title != NULL) printf("%s\n", title);
 
         int result = pam_authenticate(pamh, 0);
         if (result == PAM_SUCCESS) break;
 
-        // Don't log unknown usernames.
         const char *username = result == PAM_USER_UNKNOWN ? NULL : pamx_get_username(pamh);
         log_btmp(username, tty);
 
@@ -333,7 +330,7 @@ static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, const char *title,
             return -1;
         }
 
-        // Screen is cleared on retry, give user some time to read errors.
+        // Wait before retrying to slow down login attempts and give time to read error messages.
         sleep(retry_delay);
     }
 
@@ -438,7 +435,7 @@ static char *get_shell_name(const char *shell_path) {
         syslog(LOG_ERR, "Process ran out of memory");
         return NULL;
     }
-    // Prepend '-' to the shell name (0th arg) to indicate that this is a login shell,
+    // Prepend '-' to the shell name to indicate that this is a login shell,
     // so that it runs `/etc/profile` and other initial configuration files.
     int written = snprintf(buffer, buffer_size, "-%s", name);
     ASSERT(written == (int) (buffer_size - 1));
@@ -512,7 +509,6 @@ int main(int argc, char **argv) {
         goto exit2;
     }
 
-    // Get user information from `/etc/passwd`.
     char *pwdbuf = NULL;
     struct passwd *pwd = get_passwd(username, &pwdbuf);
     if (pwd == NULL) goto exit2;
@@ -520,7 +516,7 @@ int main(int argc, char **argv) {
     // Set user groups from `/etc/group`. `initgroups` overwrites current groups
     // so it should be done before opening PAM session in case that `pam_setcred`
     // adds more groups.
-    if (initgroups(username, pwd->pw_gid) < 0) {
+    if (initgroups(username, pwd->pw_gid) != 0) {
         syslog(LOG_ERR, "Failed to initialize groups: %s", strerror(errno));
         goto exit3;
     }
@@ -530,8 +526,7 @@ int main(int argc, char **argv) {
     if (chown_tty(pwd->pw_uid) != 0) goto exit3;
     log_utmp_login(username, &tty);
 
-    // Detach the controlling TTY to reacquire in the child session.
-    // It sends SIGHUP to the foreground job (current process), ignore it.
+    // Give up the controlling terminal and reacquire it in the child to detach the parent from it.
     signal(SIGHUP, SIG_IGN);
     if (ioctl(STDIN_FILENO, TIOCNOTTY) != 0) {
         syslog(LOG_ERR, "Failed to detach the controlling TTY: %s", strerror(errno));
@@ -548,7 +543,6 @@ int main(int argc, char **argv) {
     sigaddset(&signals, SIGTERM);
     sigprocmask(SIG_BLOCK, &signals, NULL);
 
-    // Create child process that will exec, and parent who will cleanup when it exits.
     pid_t pid = fork();
     if (pid < 0) {
         syslog(LOG_ERR, "Failed to fork");
@@ -576,19 +570,19 @@ int main(int argc, char **argv) {
     // Unset pam handler to skip PAM cleanup.
     pamh = NULL;
 
-    // Start a new session (and process group) so that signals sent to child don't kill parent.
+    // Start a new session and reacquire the TTY, again.
     setsid();
     if (open_tty(tty.path) != 0) goto exit4;
 
-    // Change user, drop root privileges.
     int result = setgid(pwd->pw_gid);
     ASSERT(result == 0);
+    // Drop the root privileges.
     result = setuid(pwd->pw_uid);
     ASSERT(result == 0);
 
     const char *home_env = getenv("HOME");
     const char *home = home_env == NULL ? pwd->pw_dir : home_env;
-    if (chdir(home) < 0) {
+    if (chdir(home) != 0) {
         syslog(LOG_ERR, "Failed to change directory to \"%s\": %s", home, strerror(errno));
         goto exit4;
     }
