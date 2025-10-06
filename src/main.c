@@ -324,7 +324,7 @@ static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, const char *title,
     return 0;
 }
 
-static int pamx_open_sesion(pam_handle_t *pamh) {
+static int pamx_open_session(pam_handle_t *pamh) {
     ASSERT(pamh != NULL);
 
     int result = pam_open_session(pamh, 0);
@@ -361,7 +361,11 @@ static int init_environ(pam_handle_t *pamh, const struct passwd *pwd) {
         syslog(LOG_ERR, "Failed to get PAM environment variables");
         return -1;
     }
-    for (int i = 0; env[i] != NULL; i++) putenv(env[i]);
+    for (int i = 0; env[i] != NULL; i++) {
+        putenv(env[i]);
+        free(env[i]);
+    }
+    free(env);
 
     return 0;
 }
@@ -484,7 +488,7 @@ int main(int argc, char **argv) {
         goto exit3;
     }
 
-    if (pamx_open_sesion(pamh) != 0) goto exit3;
+    if (pamx_open_session(pamh) != 0) goto exit3;
     if (init_environ(pamh, pwd) != 0) goto exit3;
     if (chown_tty(pwd->pw_uid) != 0) goto exit3;
     log_utmp(username, &tty);
