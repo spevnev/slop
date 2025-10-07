@@ -413,10 +413,7 @@ static int init_environ(pam_handle_t *pamh, const struct passwd *pwd) {
         syslog(LOG_ERR, "Failed to get PAM environment variables");
         return -1;
     }
-    for (int i = 0; env[i] != NULL; i++) {
-        putenv(env[i]);
-        free(env[i]);
-    }
+    for (int i = 0; env[i] != NULL; i++) putenv(env[i]);
     free(env);
 
     return 0;
