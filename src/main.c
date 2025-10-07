@@ -53,6 +53,13 @@ typedef struct {
         }                                                                                     \
     } while (0)
 
+static volatile sig_atomic_t should_exit = false;
+
+static void sig_handler(UNUSED int signal) {
+    should_exit = true;
+    syslog(LOG_INFO, "Received signal %d. Terminating", signal);
+}
+
 static pid_t child_pid = -1;
 static void parent_sig_handler(UNUSED int signal) {
     ASSERT(child_pid != -1);
@@ -60,8 +67,20 @@ static void parent_sig_handler(UNUSED int signal) {
     kill(child_pid, SIGHUP);
 }
 
-static volatile sig_atomic_t should_exit = false;
-static void sig_handler(UNUSED int signal) { should_exit = true; }
+static struct sigaction set_sig_handler(int signal, void (*handler)(int), int flags) {
+    struct sigaction act = {0};
+    sigemptyset(&act.sa_mask);
+    act.sa_handler = handler;
+    act.sa_flags = flags;
+
+    struct sigaction old_act;
+    sigaction(signal, &act, &old_act);
+    return old_act;
+}
+
+static struct sigaction ignore_sig(int signal) { return set_sig_handler(signal, SIG_IGN, 0); }
+
+static void restore_sig_handler(int signal, struct sigaction act) { sigaction(signal, &act, NULL); }
 
 static void clear_tty(void) { printf("\033[H\033[J"); }
 
@@ -193,10 +212,9 @@ static int init_tty(tty_info *tty) {
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
 
-    // Ignore SIGHUP to avoid getting killed if TTY is already the controlling terminal.
-    signal(SIGHUP, SIG_IGN);
+    struct sigaction old_act = ignore_sig(SIGHUP);
     vhangup();
-    signal(SIGHUP, SIG_DFL);
+    restore_sig_handler(SIGHUP, old_act);
 
     // Start a new session and reopen the TTY to make it the controlling terminal.
     setsid();
@@ -280,11 +298,18 @@ static const char *pamx_get_username(const pam_handle_t *pamh) {
     return (const char *) item;
 }
 
+// Wrapper around `misc_conv` that returns error to finish PAM call instead of blocking.
+static int conv_wrapper(int num_msg, const struct pam_message **msgm, struct pam_response **response,
+                        void *appdata_ptr) {
+    if (should_exit) return PAM_CONV_ERR;
+    return misc_conv(num_msg, msgm, response, appdata_ptr);
+}
+
 static pam_handle_t *pamx_init(const tty_info *tty, const char *username) {
     ASSERT(tty != NULL);
 
     struct pam_conv conv = {
-        .conv = misc_conv,
+        .conv = conv_wrapper,
         .appdata_ptr = NULL,
     };
     pam_handle_t *pamh = NULL;
@@ -312,6 +337,7 @@ static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, const char *title,
         if (title != NULL) printf("%s\n", title);
 
         int result = pam_authenticate(pamh, 0);
+        if (should_exit) return -1;
         if (result == PAM_SUCCESS) break;
 
         const char *username = result == PAM_USER_UNKNOWN ? NULL : pamx_get_username(pamh);
@@ -335,7 +361,11 @@ static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, const char *title,
     }
 
     int result = pam_acct_mgmt(pamh, 0);
-    if (result == PAM_NEW_AUTHTOK_REQD) result = pam_chauthtok(pamh, PAM_CHANGE_EXPIRED_AUTHTOK);
+    if (should_exit) return -1;
+    if (result == PAM_NEW_AUTHTOK_REQD) {
+        result = pam_chauthtok(pamh, PAM_CHANGE_EXPIRED_AUTHTOK);
+        if (should_exit) return -1;
+    }
     if (result != PAM_SUCCESS) {
         log_pam_error("acct_mgmt", pamh, result);
         return -1;
@@ -348,12 +378,14 @@ static int pamx_open_session(pam_handle_t *pamh) {
     ASSERT(pamh != NULL);
 
     int result = pam_open_session(pamh, 0);
+    if (should_exit) return -1;
     if (result != PAM_SUCCESS) {
         log_pam_error("open_session", pamh, result);
         return -1;
     }
 
     result = pam_setcred(pamh, PAM_ESTABLISH_CRED);
+    if (should_exit) return -1;
     if (result != PAM_SUCCESS) {
         log_pam_error("setcred", pamh, result);
         pam_close_session(pamh, 0);
@@ -446,8 +478,14 @@ int main(int argc, char **argv) {
     bool success = false;
 
     // Prevent user from killing the program using 'Ctrl+C' and 'Ctrl+\'.
-    signal(SIGINT, SIG_IGN);
-    signal(SIGQUIT, SIG_IGN);
+    ignore_sig(SIGINT);
+    ignore_sig(SIGQUIT);
+
+    // Exit gracefully on SIGTERM and SIGHUP.
+    // Do not set `SA_RESTART` so that signal interrupts PAM conversation and causes
+    // a PAM function to fail instead of waiting for user input indefinitely.
+    set_sig_handler(SIGTERM, sig_handler, 0);
+    set_sig_handler(SIGHUP, sig_handler, 0);
 
     // If locale is "", it is set according to the environment variables.
     setlocale(LC_ALL, "");
@@ -498,11 +536,6 @@ int main(int argc, char **argv) {
     if (pamh == NULL) goto exit1;
     if (pamx_auth(pamh, &tty, *title, *retry_delay) != 0) goto exit2;
 
-    // Set handlers after `pam_authenticate` because it blocks and is not interrupted by signals.
-    // Also, there are no resources that need to be cleaned up at this point.
-    signal(SIGTERM, sig_handler);
-    signal(SIGHUP, sig_handler);
-
     const char *username = pamx_get_username(pamh);
     if (username == NULL) {
         syslog(LOG_ERR, "Failed to get username");
@@ -522,17 +555,17 @@ int main(int argc, char **argv) {
     }
 
     if (pamx_open_session(pamh) != 0) goto exit3;
-    if (init_environ(pamh, pwd) != 0) goto exit3;
-    if (chown_tty(pwd->pw_uid) != 0) goto exit3;
     log_utmp_login(username, &tty);
+    if (init_environ(pamh, pwd) != 0) goto exit4;
+    if (chown_tty(pwd->pw_uid) != 0) goto exit4;
 
-    // Give up the controlling terminal and reacquire it in the child to detach the parent from it.
-    signal(SIGHUP, SIG_IGN);
+    // Give up the controlling terminal and reacquire it in the child process.
+    struct sigaction old_act = ignore_sig(SIGHUP);
     if (ioctl(STDIN_FILENO, TIOCNOTTY) != 0) {
         syslog(LOG_ERR, "Failed to detach the controlling TTY: %s", strerror(errno));
         goto exit4;
     }
-    signal(SIGHUP, sig_handler);
+    restore_sig_handler(SIGHUP, old_act);
 
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
@@ -552,8 +585,8 @@ int main(int argc, char **argv) {
     if (pid != 0) {
         // Setup handlers that will forward signals to the child process.
         child_pid = pid;
-        signal(SIGHUP, parent_sig_handler);
-        signal(SIGTERM, parent_sig_handler);
+        set_sig_handler(SIGHUP, parent_sig_handler, 0);
+        set_sig_handler(SIGTERM, parent_sig_handler, 0);
         sigprocmask(SIG_UNBLOCK, &signals, NULL);
 
         while (wait(NULL) == -1 && errno == EINTR);
@@ -588,8 +621,8 @@ int main(int argc, char **argv) {
     }
 
     // Ignored signals may remain ignored after exec, reset their handlers.
-    signal(SIGINT, SIG_DFL);
-    signal(SIGQUIT, SIG_DFL);
+    set_sig_handler(SIGINT, SIG_DFL, 0);
+    set_sig_handler(SIGQUIT, SIG_DFL, 0);
 
     if (should_exit) goto exit4;
 
