@@ -1,0 +1,7 @@
+#%PAM-1.0
+
+# Use the same PAM configuration as login.
+auth       include      login
+account    include      login
+session    include      login
+password   include      login

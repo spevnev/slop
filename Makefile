@@ -1,43 +1,33 @@
-prefix      := /usr/local
+prefix      := /usr
 exec_prefix := $(prefix)
 bindir      := $(exec_prefix)/bin
-
-SRC_DIR := src
-OUT_DIR := build
+sysconfdir  := /etc
 
 BIN_NAME := slop
+OUT_DIR  := build
 BIN_PATH := $(OUT_DIR)/$(BIN_NAME)
-INSTALL_PATH := $(DESTDIR)$(bindir)/$(BIN_NAME)
+PAM_PATH := pam/$(BIN_NAME)
 
-CFLAGS := -std=c99 -Wall -Wextra -pedantic -MMD -MP -O2
+BIN_INSTALL_PATH := $(DESTDIR)$(bindir)/$(BIN_NAME)
+PAM_INSTALL_PATH := $(DESTDIR)$(sysconfdir)/$(BIN_NAME)
+
+CFLAGS := -O2 -std=c99 -Wall -Wextra -pedantic
 LDLIBS := -lpam -lpam_misc
-
-ifeq ($(DEBUG), 1)
-	CFLAGS += -g3 -fsanitize=address,leak,undefined
-endif
-
-SRCS := $(wildcard $(SRC_DIR)/*.c)
-OBJS := $(patsubst %.c, $(OUT_DIR)/%.o, $(SRCS))
-DEPS := $(OBJS:.o=.d)
 
 .PHONY: all clean install uninstall
 all: $(BIN_PATH)
 
-clean:
-	rm -rf $(OUT_DIR)
-
-install:
-	install -D -m755 $(BIN_PATH) $(INSTALL_PATH)
-
-uninstall:
-	rm $(INSTALL_PATH)
-
-$(BIN_PATH): $(OBJS)
+$(BIN_PATH): src/main.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ $(LDLIBS)
 
-$(OUT_DIR)/%.o: %.c
-	@mkdir -p $(@D)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+clean:
+	rm -rf $(OUT_DIR)
 
--include $(DEPS)
+install: $(BIN_PATH)
+	install -D -m 755 $(BIN_PATH) $(BIN_INSTALL_PATH)
+	install -D -m 644 $(PAM_PATH) $(PAM_INSTALL_PATH)
+
+uninstall:
+	rm -f $(BIN_INSTALL_PATH)
+	rm -f $(PAM_INSTALL_PATH)
