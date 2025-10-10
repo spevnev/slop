@@ -82,7 +82,10 @@ static struct sigaction ignore_sig(int signal) { return set_sig_handler(signal, 
 
 static void restore_sig_handler(int signal, struct sigaction act) { sigaction(signal, &act, NULL); }
 
-static void clear_tty(void) { printf("\033[H\033[J"); }
+static void clear_tty(void) {
+    printf("\033[H\033[J");
+    fflush(stdout);
+}
 
 static int open_tty(const char *path) {
     ASSERT(path != NULL);
@@ -329,12 +332,15 @@ static pam_handle_t *pamx_init(const tty_info *tty, const char *username) {
     return pamh;
 }
 
-static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, const char *title, int retry_delay) {
+static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, bool dont_clear, const char *title, int retry_delay) {
     ASSERT(pamh != NULL && tty != NULL);
 
+    if (dont_clear && title != NULL) printf("%s\n", title);
     while (true) {
-        clear_tty();
-        if (title != NULL) printf("%s\n", title);
+        if (!dont_clear) {
+            clear_tty();
+            if (title != NULL) printf("%s\n", title);
+        }
 
         int result = pam_authenticate(pamh, 0);
         if (should_exit) return -1;
@@ -496,6 +502,7 @@ int main(int argc, char **argv) {
     const char **provided_username = option_str(&a, 'u', "username", "Use the provided username", true, NULL);
     const char **command = option_str(&a, 'c', "command", "Command to run on successful login", true, NULL);
     bool *focus_tty = option_flag(&a, 'f', "focus", "Focus the TTY");
+    bool *dont_clear = option_flag(&a, 'n', "no-clear", "Don't clear the TTY");
 
     char **pos_args;
     int pos_args_len = parse_args(&a, argc, argv, &pos_args);
@@ -531,7 +538,7 @@ int main(int argc, char **argv) {
 
     pam_handle_t *pamh = pamx_init(&tty, *provided_username);
     if (pamh == NULL) goto exit1;
-    if (pamx_auth(pamh, &tty, *title, *retry_delay) != 0) goto exit2;
+    if (pamx_auth(pamh, &tty, *dont_clear, *title, *retry_delay) != 0) goto exit2;
 
     const char *username = pamx_get_username(pamh);
     if (username == NULL) {
