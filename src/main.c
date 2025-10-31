@@ -43,7 +43,7 @@ typedef struct {
     const char *path;
     const char *name;
     const char *number;
-} tty_info;
+} TTY;
 
 #define ASSERT(condition)                                                                     \
     do {                                                                                      \
@@ -179,7 +179,7 @@ static int set_tty_attributes(void) {
     return 0;
 }
 
-static int init_tty(tty_info *tty) {
+static int init_tty(TTY *tty) {
     ASSERT(tty != NULL);
 
     if (!isatty(STDIN_FILENO)) {
@@ -235,7 +235,7 @@ static int init_tty(tty_info *tty) {
     return 0;
 }
 
-static struct utmpx new_utmpx_entry(const char *username, const tty_info *tty) {
+static struct utmpx new_utmpx_entry(const char *username, const TTY *tty) {
     ASSERT(tty != NULL);
 
     struct timeval tv;
@@ -253,14 +253,14 @@ static struct utmpx new_utmpx_entry(const char *username, const tty_info *tty) {
 }
 
 // Log a failed login attempt to btmp.
-static void log_btmp(const char *username, const tty_info *tty) {
+static void log_btmp(const char *username, const TTY *tty) {
     // NULL username indicates logout, use "(unknown)" instead.
     struct utmpx ut = new_utmpx_entry(username == NULL ? "(unknown)" : username, tty);
     updwtmpx(_PATH_BTMP, &ut);
 }
 
 // Log login to utmp and wtmp.
-static void log_utmp_login(const char *username, const tty_info *tty) {
+static void log_utmp_login(const char *username, const TTY *tty) {
     struct utmpx ut = new_utmpx_entry(username, tty);
 
     utmpxname(_PATH_UTMP);
@@ -272,7 +272,7 @@ static void log_utmp_login(const char *username, const tty_info *tty) {
 }
 
 // Log logout to utmp and wtmp.
-static void log_utmp_logout(const char *username, const tty_info *tty) {
+static void log_utmp_logout(const char *username, const TTY *tty) {
     struct utmpx ut = new_utmpx_entry(username, tty);
     ut.ut_type = DEAD_PROCESS;
 
@@ -308,7 +308,7 @@ static int conv_wrapper(int num_msg, const struct pam_message **msgm, struct pam
     return misc_conv(num_msg, msgm, response, appdata_ptr);
 }
 
-static pam_handle_t *pamx_init(const tty_info *tty, const char *username) {
+static pam_handle_t *pamx_init(const TTY *tty, const char *username) {
     ASSERT(tty != NULL);
 
     struct pam_conv conv = {
@@ -332,7 +332,7 @@ static pam_handle_t *pamx_init(const tty_info *tty, const char *username) {
     return pamh;
 }
 
-static int pamx_auth(pam_handle_t *pamh, const tty_info *tty, bool dont_clear, const char *title, int retry_delay) {
+static int pamx_auth(pam_handle_t *pamh, const TTY *tty, bool dont_clear, const char *title, int retry_delay) {
     ASSERT(pamh != NULL && tty != NULL);
 
     if (dont_clear && title != NULL) printf("%s\n", title);
@@ -528,7 +528,7 @@ int main(int argc, char **argv) {
         goto exit1;
     }
 
-    tty_info tty = {0};
+    TTY tty = {0};
     if (init_tty(&tty) != 0) goto exit1;
 
     if (*focus_tty) {
