@@ -24,7 +24,11 @@
 #include <utmpx.h>
 #include "args.h"
 
-#if defined(__has_attribute) && __has_attribute(unused)
+#ifndef __has__attribute
+#define __has__attribute(attribute) 0
+#endif
+
+#if __has_attribute(unused)
 #define UNUSED __attribute__((unused))
 #else
 #define UNUSED
