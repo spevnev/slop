@@ -481,6 +481,12 @@ static char *get_shell_name(const char *shell_path) {
     return buffer;
 }
 
+static void print_help(Args *a, const char *program_name) {
+    printf("%s - simple login program\n", program_name);
+    printf("Usage: %s [options]\n", program_name);
+    print_options(a, stdout);
+}
+
 int main(int argc, char **argv) {
     bool success = false;
 
@@ -497,28 +503,20 @@ int main(int argc, char **argv) {
     // If locale is "", it is set according to the environment variables.
     setlocale(LC_ALL, "");
 
-    openlog("slop", 0, LOG_AUTHPRIV);
-
-    args a = {0};
-    bool *help = option_flag(&a, 'h', "help", "Show help");
-    long *retry_delay = option_long(&a, 'd', "delay", "Number of seconds to wait after failed login attempt", true, 2);
-    const char **title = option_str(&a, 't', "title", "Title to print above the prompt", true, NULL);
-    const char **provided_username = option_str(&a, 'u', "username", "Use the provided username", true, NULL);
-    const char **command = option_str(&a, 'c', "command", "Command to run on successful login", true, NULL);
-    bool *focus_tty = option_flag(&a, 'f', "focus", "Focus the TTY");
-    bool *dont_clear = option_flag(&a, 'n', "no-clear", "Don't clear the TTY");
+    Args a = {0};
+    option_help(&a, print_help);
+    const long *retry_delay = option_long(&a, "delay", "Number of seconds to wait after failed login attempt",
+                                          .short_name = 'd', .default_value = 2);
+    const char **title = option_string(&a, "title", "Title to print above the prompt", .short_name = 't');
+    const char **provided_username = option_string(&a, "username", "Use the provided username", .short_name = 'u');
+    const char **command = option_string(&a, "command", "Command to run on successful login", .short_name = 'c');
+    const bool *focus_tty = option_flag(&a, "focus", "Focus the TTY", .short_name = 'f');
+    const bool *dont_clear = option_flag(&a, "no-clear", "Don't clear the TTY", .short_name = 'n');
 
     char **pos_args;
     int pos_args_len = parse_args(&a, argc, argv, &pos_args);
 
-    if (*help) {
-        printf("%s - simple login program\n", argv[0]);
-        printf("Usage: %s [options]\n", argv[0]);
-        printf("\n");
-        print_options(&a, stdout);
-        success = true;
-        goto exit1;
-    }
+    openlog("slop", 0, LOG_AUTHPRIV);
 
     if (pos_args_len > 0) {
         fprintf(stderr, "Positional arguments are not allowed. See \"--help\".\n");

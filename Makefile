@@ -14,13 +14,13 @@ BASH_COMPLETION_PATH := $(DESTDIR)/usr/share/bash-completion/completions/$(BIN_N
 ZSH_COMPLETION_PATH  := $(DESTDIR)/usr/share/zsh/site-functions/_$(BIN_NAME)
 FISH_COMPLETION_PATH := $(DESTDIR)/usr/share/fish/vendor_completions.d/$(BIN_NAME).fish
 
-CFLAGS := -O2 -std=c99 -Wall -Wextra -pedantic
+CFLAGS := -O2 -std=c99 -Wall -Wextra -pedantic -Ivendor
 LDLIBS := -lpam -lpam_misc
 
 .PHONY: all clean install uninstall
 all: $(BIN_PATH)
 
-$(BIN_PATH): src/main.c src/args.h
+$(BIN_PATH): src/main.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@ $(LDLIBS)
 
